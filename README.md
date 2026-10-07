@@ -2,6 +2,12 @@
 
 [中文介绍](./docs/中文/README中文.md)
 
+## Distributed operating system research
+
+[CCNET network formation (PDF)](./CCNET_Network_Formation_EN.pdf) · [SCP congestion control (PDF)](./SCP_Congestion_Control_EN.pdf) · [ccBPF execution migration (PDF)](./CCBPF_Execution_Migration_EN.pdf)
+
+The three English PDFs are at the project root. They record the project's research history, mathematical models, implementation evidence, historical experiments, corrections, and unfinished work. Editable sources are in `overleaf/network_formation/`, `overleaf/congestion_control/`, and `overleaf/execution_migration/`. Each self-contained `main.tex` can be uploaded to a separate Overleaf project and compiled with pdfLaTeX using the standard IEEEtran class. Automatic topology management, general transport fairness, and migration scheduling remain unfinished.
+
 LTTit is a distributed embedded operating system that enables **runtime migration of compiled programs across heterogeneous bare‑metal microcontrollers**. The system unifies multiple MCUs into a single execution environment where computation can move between nodes without restarting.
 
 # WiKi

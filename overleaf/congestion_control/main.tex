@@ -1,0 +1,282 @@
+\documentclass[conference,letterpaper]{IEEEtran}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm,booktabs,array}
+\usepackage{cite}
+\usepackage{flushend}
+\usepackage[hidelinks]{hyperref}
+\newtheorem{proposition}{Proposition}
+\newcommand{\clip}[1]{[#1]_{[0,1]}}
+\title{SCP Research Record: Congestion Signals,\\Externalities, and the Dynamics of Pacing}
+\author{\IEEEauthorblockN{Skai Uijing}\IEEEauthorblockA{LTTit Research\\Research record, October 6, 2026}}
+\begin{document}
+\maketitle
+\begin{abstract}
+SCP began as a reliable transport for LTTit's distributed embedded runtime. Poor behavior under random loss prompted experiments with a nonlinear loss-and-delay controller, followed by deeper questions about fairness, responsibility for congestion, and the interaction between window growth and packet scheduling. This paper records that progression rather than presenting a single finished controller. We describe the implemented PROB law and its documented fairness failures; explain why congestion severity, marginal responsibility, and economic externality are different quantities; and summarize the subsequent explicit-feedback and receiver-control investigations. The most developed mathematical result is an exact analysis of a specified per-ACK append scheduler. Under fixed RTT, one ACK per packet, and unbounded slow start, harmonic blocks give a growth exponent of $\min(g/2,\log 2)$ and a transition at $g=2\log 2$. These results concern that scheduler, not all pacers or the current SCP implementation. Historical measurements, deterministic simulations, finite rational checks, and conjectures are identified separately. The retained work supplies models and testable boundaries; multi-flow stability, implementation correspondence, and deployment benefits remain open.
+\end{abstract}
+\begin{IEEEkeywords}
+congestion control, pacing, ACK feedback, externality, reliable transport, research history
+\end{IEEEkeywords}
+
+\section{From an Embedded Transport to Research Questions}
+SCP provides reliability, flow control, and congestion control between CCNET routing and CCRPC operations in LTTit. The March 7 development post describes a Reno-based, ACK-driven implementation and a long bidirectional file-transfer experiment. The June 14 post asks why random loss should always force the same response as congestion. That question led to a Bayesian-inspired engineering score, nonlinear window updates, and the PROB implementation. The posts record observations and evolving explanations; their front-matter dates do not establish when every later edit was made.
+
+The subsequent research did not stop at finding a more aggressive increase rule. Poor competition results led to questions about who causes congestion and who should pay. September notes distinguish finite-horizon actionability, counterfactual harm to competing flows, explicit exchange of resource information, and receiver-issued credits. A separate investigation was motivated by an observation that changing SCP from burst transmission to pacing could slow transfer without a comparable change in useful-byte fraction. This motivated an analysis of the physical timing of ACK feedback, rather than another utility function chosen in advance.
+
+\begin{table}[t]
+\caption{Preserved research progression. Records are not equivalent to deployment evidence.}
+\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{.18\columnwidth}>{\raggedright\arraybackslash}p{.74\columnwidth}@{}}
+\toprule
+Record & Question and current status\\\midrule
+March--June posts & Reliable Reno transport; random-loss performance; Bayesian-inspired score experiments.\\
+August PROB & Implemented nonlinear controller; historical throughput and fairness reports, including failures.\\
+September 9 & Code/formula errata; pacing-aware and acknowledged-service candidates, with simulation limits.\\
+September 16--17 & Externality counterexample, ideal price feedback, explicit information and receiver-control literature.\\
+September 25 & Exact per-ACK append model, general-gain proof, finite rational verification; CA conjecture retained.\\
+September 29--October & BBR gain comparison and implementation questions; no established equivalence to BBR or Linux.\\\bottomrule
+\end{tabular}
+\end{table}
+
+The inspected standalone SCP source is based on revision \texttt{bf9d887}; LTTit's embedded SCP is a different snapshot and still contains Reno-style control. Claims about the standalone PROB experiment must not be attributed automatically to the integrated firmware. This paper consolidates existing evidence and performs no new network benchmark.
+
+\section{Implemented PROB: What the Signal Means}
+Let $W$ be the byte window, $M$ the MSS, $b$ newly acknowledged bytes, and $\widetilde\ell$ a smoothed loss estimate. The code's RTT hook forms an effective sample
+\begin{equation}
+r_{\rm eff}=r_{\rm raw}+\widetilde\ell\,(200\,\mathrm{ms}).
+\end{equation}
+After smoothing, the score uses $d=\max(0,\mathrm{srtt}-r_{\rm base})$ and a sigmoid
+\begin{equation}
+q=\frac{1}{1+\exp[-(\gamma+\beta d)]}.
+\end{equation}
+Configured anchors place $q=.2$ at $d_{\min}$ and $q=.8$ at $d_{\min}+s$, so $\beta=2\log4/s$ and $\gamma=-\log4-\beta d_{\min}$. Fixed-point evaluation and an exponential moving average implement the score. It is not an empirically calibrated posterior probability. Adding separate log-likelihood terms would require a specified statistical model, including conditional-independence assumptions; correlated delay and loss do not establish that model by themselves.
+
+The controller has increase and decrease phases, switching at $q\ge.6$ and $q\le.4$, respectively. In ideal real-valued notation, the corresponding changes are
+\begin{align}
+a(q)&=1-\clip{q/(9/13)}^2,\\
+\Delta W_{\rm inc}&=\max\{1,a(q)Mb/\max(W,1)\},\\
+h(q,\bar q)&=\clip{(\max(q,\bar q)-4/13)/(1-4/13)}^2,\\
+\Delta W_{\rm dec}&=-.3h(q,\bar q)(W-M)
+\min\{1,b/W\}.\label{eq:dec}
+\end{align}
+The implementation then clips the window and converts to an integer. The configured MSS is 1,430 bytes. Loss and timeout callbacks in PROB do not directly impose Reno's window cut, but transport retransmission and recovery remain active.
+
+The September 9 erratum matters mathematically. An older formula omitted the ACK-ratio cap in~\eqref{eq:dec}; a cumulative ACK can exceed a recently reduced window. RTT sampling and new-byte acknowledgement are also separate events in the code. A proof about equal-signal, equal-byte, per-ACK maps is not a proof of equal rates in wall-clock time. For example, ignoring clipping in the increase branch,
+\begin{equation}
+\frac{dW}{dA}=\frac{a(q)M}{W},\quad
+\frac{dA}{dt}\simeq\frac WR
+\quad\Longrightarrow\quad
+\frac{dW}{dt}\simeq\frac{a(q)M}{R}.
+\end{equation}
+Two windows with the same $q,R$ then have equal first-order slopes; their absolute difference need not contract. Heterogeneous ACK rates and switching times require their own analysis.
+
+\subsection{Historical Results, Including Failure}
+The August 19 README reports a five-Mbit/s configuration, 50-ms one-way delay, a 1,000-packet queue, 100-MiB single-flow transfers, and 300-second competition tests. Table~\ref{tab:prob} preserves selected results from that record. Its raw per-run logs are not bound to the inspected revision, so these values are historical reports, not independently reproduced measurements. The earlier six-page PROB PDF contains a different result set and must not be pooled with this table.
+
+\begin{table}[t]
+\caption{Selected August 19 README reports. Random-loss percentage is a test condition; these are not new runs.}
+\label{tab:prob}
+\centering\small
+\begin{tabular}{llrr}
+\toprule
+Flows & Loss & Total Mbit/s & Jain index\\\midrule
+One PROB & 0\% & 4.686 & ---\\
+One AIMD & 0\% & 4.746 & ---\\
+Two PROB & 0\% & 4.735 & .641\\
+PROB + AIMD & 0\% & 3.421 & .504\\
+Two PROB & 10\% & 2.044 & .999887\\\bottomrule
+\end{tabular}
+\end{table}
+
+In the zero-random-loss mixed test, PROB obtained only about 0.36\% of delivered bytes. Two PROB flows had a reported throughput ratio of about 6.95 without random loss, despite near-equal sharing in the 10\% case. These outcomes motivated the attribution investigation. They do not support a general fairness or global-stability claim, nor do the favorable high-loss observations establish superiority over modern transport baselines.
+
+\section{From Congestion Attribution to External Cost}
+The initial economic intuition was that a flow causing congestion should bear its cost. September's refinement asks what quantity can actually be identified and controlled. Occupancy share, a probability that the network is congested, the effect of changing one's own rate, and harm to other users are not interchangeable.
+
+\subsection{A Static Distinction}
+For total load $X=\sum_i x_i$ and per-unit congestion cost $d(X)$, private cost is $h_i=x_i d(X)$ and total cost is $H=Xd(X)$. Holding other rates fixed,
+\begin{equation}
+\frac{\partial H}{\partial x_i}=d+Xd',\qquad
+\frac{\partial h_i}{\partial x_i}=d+x_i d',
+\end{equation}
+so marginal external cost is
+\begin{equation}
+\tau_i=(X-x_i)d'(X).
+\end{equation}
+A measured own-rate sensitivity $x_i d'$ therefore still needs other-load information to recover $\tau_i$. A budget-balanced proportional charge $x_i d(X)$ is not automatically an externality tax. Conversely, multiplying the marginal tax by $x_i$ does not generally give a total payment with the desired derivative. With other rates fixed, one such integrated payment is $(X-x_i)[d(X)-d(X-x_i)]$.
+
+The draft defines a finite-horizon counterpart using the other flows' \emph{net} payoffs $P_j$ and a perturbation $\epsilon$ of sender $i$:
+\begin{equation}
+E_i(T)=-\left.\frac{d}{d\epsilon}\sum_{j\ne i}P_j(T;\epsilon)\right|_{\epsilon=0}.
+\end{equation}
+Effective delivered work, cost weights, horizon, controller policy, and actual actuator perturbation must all be specified. It is not legitimate to hold competing rates fixed while claiming to have measured their closed-loop response. Different unobserved utility weights can produce the same RTT trace but different $E_i$; local timing alone cannot universally identify that economic quantity.
+
+\subsection{Why Queue Recovery Can Hide Harm}
+The September 16 notes construct a transparent PI example. Let $z$ be a queue deviation, $u=\epsilon$ a constant added input, and $v$ a competing controller's response:
+\begin{equation}
+\dot z=u+v,\quad v=-2z/\theta-b/\theta^2,\quad\dot b=z,
+\end{equation}
+with zero initial deviations. Direct solution gives
+\begin{align}
+z(t)&=\epsilon t e^{-t/\theta},\\
+v(t)&=\epsilon[(1-t/\theta)e^{-t/\theta}-1].
+\end{align}
+The queue deviation returns to zero while the competitor's rate change tends to $-\epsilon$. Thus a terminal queue signal can disappear because someone else yielded. This does not make every queue statistic vanish: integrated extra delay through capacity $C$ is
+\begin{equation}
+\frac{\epsilon\theta^2}{C}
+\left[1-(1+T/\theta)e^{-T/\theta}\right].
+\end{equation}
+The accompanying RK4 check tests this ideal ODE, not TCP or SCP. The example assumes an interior queue, small perturbations, and no feedback delay or actuator saturation. Its role is to refute an overly broad identification claim, not to prove a universal impossibility theorem for all signals.
+
+\subsection{What a Dynamic Derivative Would Require}
+The economic derivation draft also makes the missing information explicit. For a finite-horizon state model $z_{k+1}=F(z_k,\theta,\xi_k)$, a fixed initial state and a smooth fixed event branch give the sensitivity recursion
+\begin{equation}
+S_{i,0}=0,\qquad S_{i,k+1}=A_kS_{i,k}+B_{i,k},
+\end{equation}
+where $S_{i,k}=\partial z_k/\partial\theta_i$, $A_k=\partial F/\partial z$, and $B_{i,k}=\partial F/\partial\theta_i$. Other users' payoff derivatives then involve both their direct parameter dependence and $S_{i,k}$. An adjoint can reorganize the calculation, but cannot supply unknown dynamics or unobserved utility weights. Packet drops, switching branches, and saturation also require care before differentiating a trajectory.
+
+This formulation clarifies why a requested window perturbation is insufficient evidence. An application-limited sender, receiver window, or already frozen pacing batch can prevent that request from changing actual offered traffic. The proposed experimental record therefore includes the requested action, actual new and retransmitted bytes, pending credit, and raw timing. No production estimator of these finite-horizon externalities has been implemented or validated.
+
+\subsection{An Ideal Economic Example, Not a Packet Controller}
+One solvable draft example normalizes capacity to 1, assumes $0<X<1$, and chooses $d(X)=X/(1-X)$ with payoff
+\begin{equation}
+P_i=\alpha_i\log x_i-\beta x_i d(X),\qquad \alpha_i,\beta>0.
+\end{equation}
+Total welfare is $\mathcal W=\sum_i\alpha_i\log x_i-\beta X^2/(1-X)$. Correcting private gradients by the external cost gives
+\begin{align}
+E_i&=\frac{\beta(X-x_i)}{(1-X)^2},\\
+\partial_i\mathcal W&=\frac{\alpha_i}{x_i}-\pi(X),\quad
+\pi(X)=\frac{\beta X(2-X)}{(1-X)^2}.
+\end{align}
+Its Hessian is
+\begin{equation}
+\nabla^2\mathcal W=-\operatorname{diag}(\alpha_i/x_i^2)
+-\frac{2\beta}{(1-X)^3}\mathbf1\mathbf1^T\prec0.
+\end{equation}
+Consequently there is a unique interior welfare optimum. If $A=\sum_i\alpha_i$, it satisfies $x_i^*=\alpha_iX^*/A$ and
+\begin{equation}
+A(1-X^*)^2=\beta(X^*)^2(2-X^*).
+\end{equation}
+The left side decreases and the right increases on $(0,1)$, so the aggregate solution is unique. The example shows how a fully specified cost yields a tractable optimization problem. It does not identify that cost from SCP observations or prove stability with delayed feedback. Its assumptions differ from the capacity-constrained price system below.
+
+\subsection{Explicit Information and Receiver Control}
+The investigation then moved from inference alone to explicit reports of bytes, active flows, resource groups, and common time windows. For a known single resource of capacity $C$, one ideal Kelly-type system~\cite{kelly} is
+\begin{equation}
+\dot x_i=\kappa_i(\alpha_i-px_i),\qquad
+\dot p=\gamma[\textstyle\sum_i x_i-C]^+_p,
+\label{eq:price}
+\end{equation}
+where projection prevents a negative price. Its equilibrium is $x_i^*=\alpha_i C/\sum_j\alpha_j$, $p^*=\sum_j\alpha_j/C$. The recorded Lyapunov function is
+\begin{equation}
+V=\sum_i\frac{x_i-x_i^*-x_i^*\log(x_i/x_i^*)}{\kappa_i}
++\frac{(p-p^*)^2}{2\gamma}.
+\end{equation}
+Substitution yields $\dot V\le-\sum_i\alpha_i(x_i-x_i^*)^2/(x_ix_i^*)$. This supports the ideal no-delay model with complete resource membership; it does not prove stability of heterogeneous TCP controllers, token losses, unknown bottlenecks, or instantaneous capacity feasibility.
+
+Receiver tokens and least-served-first scheduling have substantial prior art. pHost explicitly discusses fairness based on service counts~\cite{phost}; ExpressPass enforces credits along network paths~\cite{xpass}; SIRD separates receiver, sender, and network constraints~\cite{sird}. The local September 17 survey therefore narrowed the candidate questions to accounting under loss, correct resource scope, limited information, and interaction with heterogeneous senders. A token granting a bounded number of bytes is different from a permanent instruction to increase rate. Local process flow lists are not a census of all users of a physical bottleneck. No completed explicit-feedback or receiver-control deployment is claimed here.
+
+The later explicit-information note also considers a managed resource that retains heterogeneous sender controllers. It first sets a total admission budget, then allocates feasible shares such as $b_i=\min(d_i,w_i\nu)$ under demand limits $d_i$. A price, a byte grant, an ECN mark, and a hard shaper have different actuator semantics. Marking a fraction of excess traffic does not, by itself, prove that a delayed AIMD sender will adopt exactly the assigned rate. Dropping a packet after the bottleneck cannot recover capacity it already consumed. The ideal Lyapunov argument above does not cover this extension; cooperation, enforcement location, credit expiration, and control-loop interaction remain design questions.
+
+\section{Pacing: The Scheduler is Part of the Model}
+Pacing controls when available window credit becomes actual traffic. If ACKs depend on actual send times, unchanged per-ACK window updates need not produce unchanged $W(t)$. The research first used a fixed-RTT batch comparison, then refined it into an explicit reservation model. A batch pacer sampled once each RTT has the Fibonacci recurrence $L_{n+2}=L_{n+1}+L_n$, with $L_0=1,L_1=2$; immediate sending gives $2^n$. A Fibonacci lower bound needs scheduler-specific service conditions. It is not a theorem about every implementation called pacing.
+
+An earlier September 9 acknowledged-service candidate accumulated credit $\Delta\Theta=\sum\mathrm{bytes}/p_{\rm first}$ and adjusted windows on that clock. Under actual send rate equal to the configured pacing rate, this clock can track elapsed service time. That equality can fail under a window, application, or scheduler limit. Retained deterministic tests did not show a universal queueing advantage: in a 20-Mbit/s unlimited-FIFO stress experiment, maximum queue waiting was about 1.997 seconds for the candidate versus 1.578 seconds for the burst baseline. This candidate remains separate from the exact scheduler analysis below.
+
+\subsection{Exact Per-ACK Append Scheduler}
+Normalize time by fixed RTT $R$ and window by MSS $M$. Assume no loss, unlimited data, one ACK per packet, infinite slow start, no receiver-window limit, and no finite serialization time. Start with one packet sent at $s_0=0$, window 1, and tail timestamp $T_0=1/g$, for $g\ge1$.
+
+An ACK releases one in-flight slot and increases the window by one; it therefore authorizes two packet reservations. Reservations append to the queue, retain old timestamps, use the post-ACK window, and preserve a trailing pacing interval. After each reservation event, $F+Q=w$, where $F$ is in-flight and $Q$ is reserved but unsent credit. The exact recursion for ACK $k\ge1$ is
+\begin{align}
+a_k&=s_{k-1}+1,\qquad w_k=k+1,\\
+b_k&=\max(a_k,T_{k-1}),\\
+s_{2k-1}&=b_k,\qquad s_{2k}=b_k+\frac1{g(k+1)},\\
+T_k&=b_k+\frac2{g(k+1)}.\label{eq:rec}
+\end{align}
+This specifies more than a nominal rate $gW/R$. Removing the trailing interval, repricing pending packets, or waiting for an entire batch to empty defines a different scheduler.
+
+\subsection{Harmonic Blocks and the Gain Transition}
+Put $c=2/g$, $H_k=\sum_{r=1}^k1/r$, $D(j)=H_{2j}-H_j$, and $B_m=b_{2^m}$.
+\begin{proposition}
+For the scheduler~\eqref{eq:rec} and every $g\ge1$,
+\begin{align}
+B_0&=1,\quad B_{m+1}=B_m+\max\{1,cD(2^m)\},\\
+b_k&=B_m+c(H_k-H_{2^m}),\quad2^m\le k<2^{m+1}.
+\label{eq:blocks}
+\end{align}
+\end{proposition}
+\begin{proof}
+The initial ACK gives $b_1=1$. For $q=2^m$, its ACK arrives at $B_{m-1}+1$, and the previous block's tail is $B_{m-1}+cD(q/2)$, giving the block-start formula. For an interior even index $2j>q$, the candidate tail minus its ACK time is
+\[
+\Delta-1+c[D(j)-D(q/2)]>0,
+\]
+where $\Delta=B_m-B_{m-1}\ge1$. For an interior odd index $2j+1>q$, the difference is
+\[
+\Delta-1+c\left[D(j)-D(q/2)+\frac1{2j+1}-\frac1{2j+2}\right]>0.
+\]
+Here $D(j+1)-D(j)=1/[(2j+1)(2j+2)]>0$. Thus all interior events use the queue tail; summing the intervals gives~\eqref{eq:blocks} and completes induction.
+\end{proof}
+
+Only power-of-two ACK indices can add waiting beyond the reserved tail. These are analysis blocks, not RTT batching instructions. A block with $q=2^m$ contains $2q$ sends. Its first-to-last send span $L_m$, extra ACK wait $I_m$, and last-to-next-first gap $G_m$ satisfy
+\begin{align}
+L_m/R&=cD(q)-1/(2gq),\\
+I_m/R&=[1-cD(q)]_+,\\
+G_m/R&=[1-cD(q)]_++1/(2gq).
+\end{align}
+Send span is not link busy time: this model has no packet serialization duration. Finite-block waiting occurs exactly when $g>2D(2^m)$. The thresholds begin at $1,7/6,533/420$ and increase to $g_*=2\log2$.
+
+For $1\le g<g_*$, only finitely many blocks wait. Eventually $b_k=cH_k+\delta$, hence $w(\tau)=A_g e^{g\tau/2}+O(1)$ for a constant $A_g>0$. For $g\ge g_*$, every block starts at $B_m=m+1$. Since block counts double, and within-block counts differ by at most a constant factor,
+\begin{equation}
+\boxed{\lim_{\tau\to\infty}\frac{\log w(\tau)}{\tau}
+=\min\{g/2,\log2\}.}
+\end{equation}
+At the critical gain, finite-block waits stay positive but approach zero; above it their normalized limit is $1-2\log2/g$. At $g=1$, $b_k=2H_k-1$ exactly and $w(\tau)=2e^{\tau/2-\gamma_E}+O(1)$. The result explains a particular feedback loop, not optimal throughput on a congested network.
+
+\subsection{Verification and the Unfinished CA Result}
+The archived September 25 program compares an independent rational SEND/ACK event simulation with the block formulas for 13 rational gains through nine RTTs. All recorded batch and span comparisons agree. These are finite checks accompanying a proof, not a substitute for induction. Five subcritical-gain runs also compare the asymptotic prefactor at 18 RTTs; each recorded error is less than one window unit. They are deterministic model outputs, not packet captures.
+
+\begin{table}[t]
+\caption{Selected archived append-model checks at $\tau=18$. Windows are in MSS units. The asymptotic formula includes the gain-dependent prefactor; these are deterministic computations, not transport measurements.}
+\centering\small
+\begin{tabular}{rrr}
+\toprule
+Gain & Event-model window & Asymptotic prediction\\\midrule
+1.00 & 9,099 & 9,099.107\\
+1.25 & 56,912 & 56,912.191\\
+1.38 & 127,909 & 127,909.544\\\bottomrule
+\end{tabular}
+\end{table}
+
+When the same model enters congestion avoidance, the queue clock has a derived decomposition involving window size, its logarithm, and accumulated ACK waiting. The stronger proposed asymptotic
+\begin{equation}
+w(\tau)=\tau-\tfrac32\log\tau+O(1)
+\end{equation}
+still depends on an unproved waiting-term estimate. The archive reports numerical support through 3,000 RTTs, but explicitly retains it as a conjecture. It is not a result of Proposition 1, which assumes infinite slow start.
+
+\section{Relation to BBR and Actual Implementations}
+The Google BBR team's 2018 derivation~\cite{bbrgain,bbrcwnd} assumes a continuous unsaturated startup with sufficient congestion window. In RTT-normalized units, let $p(t)=k2^t$ and let the modeled bandwidth sample be
+\begin{equation}
+\widehat B(t)=\int_{t-2}^{t-1}p(u)\,du.
+\end{equation}
+Then $p=G\widehat B$ gives $G=4\log2$; the associated flight requirement gives a target cwnd gain $K=2$. Only if actual $W=K\widehat BR$ does this imply $p=(G/K)W/R=2\log2\,W/R$. BBR's bandwidth-relative gain and our window-relative gain have different denominators. Numerical coincidence is not equivalence of samplers, transient windows, or packet schedules.
+
+The latest blog explores this connection to Linux 6.6 and finite windows. The supported archival conclusion is a comparison of models, not a proof that BBR follows the exact append recursion. Pacing research already covers performance effects and implementation differences~\cite{aggarwal,quic}. A gain threshold found in this model does not establish a previously unknown reason for every Linux pacing constant.
+
+The current standalone SCP creates a batch of deadlines in \texttt{scp\_output}; an existing pending batch prevents immediate replanning. Millisecond timer callbacks can release several overdue packets, and retransmissions use a separate path. This differs from per-ACK appending and from a fluid pacer. The required next check is an event-level correspondence: actual SEND and ACK times, window, flight, reserved queue, pacing rate, recovery state, and application/receiver limits. No mathematical prediction should be promoted to an SCP performance result before this correspondence is established.
+
+\section{What Has Been Achieved and What Remains}
+The work has produced an implemented nonlinear controller, adverse competition observations, corrected implementation formulas, explicit counterexamples to simplistic attribution, ideal economic-feedback models, and a precise scheduler theorem with finite verification. It has not produced one controller that simultaneously inherits all those results. In particular, the no-delay price-model proof cannot certify PROB, and the lossless single-flow pacing theorem cannot certify fairness.
+
+The next empirical study should preserve those separations. First validate the actual scheduling trace against an explicit event model; then vary ACK ratio, timer granularity, finite link service, and recovery one at a time. Attribution experiments need reset or paired initial states and must record actual transmitted perturbations rather than requested window changes. Receiver feedback needs bounded credit accounting, loss/duplicate handling, and complete definitions of the resource group. Multi-flow tests must retain startup offsets, queue measurements, and per-flow outcomes, including failures.
+
+This record does not claim a new general congestion-control paradigm or confirmed publication novelty. Its value is that the successive research questions now have distinct mathematical objects and evidence boundaries. The account draws on the author's March--October posts, September discussion records, standalone SCP code, proof files, and historical data. These original artifacts remain in their respective research workspaces and are not bundled with this self-contained manuscript; independent reproduction requires them.
+
+\begin{thebibliography}{10}
+\bibitem{kelly} F. P. Kelly, A. K. Maulloo, and D. K. H. Tan, ``Rate control for communication networks: Shadow prices, proportional fairness and stability,'' \emph{J. Operational Research Society}, vol. 49, pp. 237--252, 1998.
+\bibitem{phost} P. X. Gao et al., ``pHost: Distributed near-optimal datacenter transport over commodity network fabric,'' in \emph{CoNEXT}, 2015. \url{https://conferences2.sigcomm.org/co-next/2015/img/papers/conext15-final1.pdf}
+\bibitem{xpass} I. Cho, K. Jang, and D. Han, ``Credit-scheduled delay-bounded congestion control for datacenters,'' in \emph{SIGCOMM}, 2017, pp. 239--252.
+\bibitem{sird} K. Prasopoulos et al., ``SIRD: A sender-informed, receiver-driven datacenter transport protocol,'' in \emph{NSDI}, 2025. \url{https://www.usenix.org/conference/nsdi25/presentation/prasopoulos}
+\bibitem{bbrgain} Google BBR Team, ``BBR Startup pacing gain: A derivation,'' technical note, June 2018. \url{https://github.com/google/bbr/blob/master/Documentation/startup/gain/analysis/bbr_startup_gain.pdf}
+\bibitem{bbrcwnd} I. Swett and Google BBR Team, ``BBR Startup cwnd gain: A derivation,'' technical note, July 2018. \url{https://github.com/google/bbr/blob/master/Documentation/startup/gain/analysis/bbr_startup_cwnd_gain.pdf}
+\bibitem{aggarwal} A. Aggarwal, S. Savage, and T. Anderson, ``Understanding the performance of TCP pacing,'' in \emph{IEEE INFOCOM}, 2000, pp. 1157--1165.
+\bibitem{quic} M. Kempf et al., ``QUIC steps: Evaluating pacing strategies in QUIC implementations,'' \emph{CoNEXT}, 2025; author version arXiv:2505.09222.
+\end{thebibliography}
+\end{document}

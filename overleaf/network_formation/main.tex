@@ -1,0 +1,237 @@
+\documentclass[conference,letterpaper]{IEEEtran}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm,booktabs,array,graphicx}
+\usepackage{cite}
+\usepackage{flushend}
+\usepackage[hidelinks]{hyperref}
+\newtheorem{proposition}{Proposition}
+\newcommand{\pos}[1]{[#1]_+}
+\title{CCNET Research Record: From Path Scores to\\Fairness-Aware Rooted-Tree Optimization}
+\author{\IEEEauthorblockN{Skai Uijing}\IEEEauthorblockA{LTTit Research\\Research record, October 6, 2026}}
+\begin{document}
+\maketitle
+\begin{abstract}
+LTTit needs network formation that responds to the congestion created by its own parent choices. A fast direct connection need not be a good attachment point when it carries many downstream flows. This paper reconstructs the project's progression from path scores to a precise topology optimization problem. Its input is a directed service-rate matrix; its output is a rooted tree whose ideal fair operation maximizes aggregate logarithmic utility. Under independent pipelined links and one equal-weight saturated flow at every non-root node, progressive filling coincides with the fixed-tree logarithmic utility optimum. This property supplies a mixed-integer formulation and tight congestion-price cuts. Partial-parent search can therefore construct a tree while maintaining an optimality gap, rather than first enumerating complete trees. We document the RC2 and Lite reference implementations, including historical failures and an archived 84-matrix evaluation. RC2 met a 1\% geometric-mean target in all 252 calls in that evaluation; this is a numerical result on a synthetic suite, not a universal runtime guarantee. Automatic measurement, firmware integration, shared-radio resource modeling, and distributed reconfiguration remain unfinished. The purpose is to preserve the research and its boundaries, not to assert priority for established optimization methods.
+\end{abstract}
+\begin{IEEEkeywords}
+network formation, network utility maximization, rooted trees, fair allocation, research record
+\end{IEEEkeywords}
+
+\section{Problem Origin and Research History}
+LTTit separates communication into CCNET routing, SCP reliable transport and congestion control, and CCRPC resource operations. The inspected CCNET implementation contains Dijkstra state and configured connectivity. It does not yet perform the automatic service measurement and global reparenting studied here. The proposed optimizer is a theoretical and computational foundation for that change, not an already deployed distributed protocol.
+
+The original question arose from mesh backhaul: when a new agent joins, which existing node should become its parent? A score based only on the candidate direct connection misses the effect on the other agents using the same upstream links. Attaching one agent can reduce several existing rates and change their relative fairness. The research consequently moved from optimizing an individual path to optimizing the utility of all agents together.
+
+Several corrections were essential. First, the capacity of one adjacent connection is not a single budget for the entire network. Second, a measured direct rate, an aggregate forwarding rate, and an agent's own end-to-end rate are different quantities. Third, capacity divided by the number of immediate children is not a general fair allocation: a child can forward several flows, and a downstream bottleneck can leave capacity available for others. Fourth, the desired rates are predictions of a fair transport mechanism, rather than commands that the topology optimizer can necessarily enforce.
+
+The discussion initially proposed equal capacities, changing cost matrices, and a throughput--fairness product. It ultimately retained a direct service matrix and a logarithmic utility objective. Within one optimization round, the matrix is fixed; changing the tree changes its path-incidence matrix and the resulting congestion. Writing those reduced rates back into the same service matrix would charge the same congestion twice. New measurements define a new optimization round, in which every parent may change, including making a newly arrived node the parent of an older node.
+
+\begin{table}[t]
+\caption{Research stages, as recorded in the local archive. Dates identify records rather than independently verified invention dates.}
+\label{tab:history}
+\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{.19\columnwidth}>{\raggedright\arraybackslash}p{.73\columnwidth}@{}}
+\toprule
+Record & Development and retained limitation\\\midrule
+Initial discussion & RSSI/path scores; equal-capacity thought experiments; recognition of shared upstream congestion.\\
+September archive & Direct-rate matrix, ideal fair allocation, joint tree construction, numerical upper bounds.\\
+RC1 to RC2 & Original 3--27-node target narrowed to a ten-node desktop core after failures; stronger formulation and candidate checks.\\
+Lite branch & Solver-free bounded search for small embedded targets; no measured MCU implementation.\\
+October 4 & Consolidated proofs, 84-matrix comparison and separate exploratory ablation.\\
+This record & Connects those results to LTTit; no new benchmark or deployed protocol is claimed.\\\bottomrule
+\end{tabular}
+\end{table}
+
+One tempting shortcut was to solve three-node groups recursively. This can reduce local work, but local optima do not preserve a global bound when groups share upstream resources. Tree depth is also not total computational work: all groups still have to be processed. That suggestion remains an unvalidated decomposition idea. The retained approach instead exposes the actual unresolved global gap, even when a time or state budget expires.
+
+\section{Position Relative to Existing Work}
+Kelly, Maulloo, and Tan established the connection between logarithmic utilities, shadow prices, and proportional fairness~\cite{kelly}. Joint route and rate optimization also predates this project: Wang et al. discuss cross-layer optimization~\cite{wang}, and Junosza-Szaniawski and Nogalski compare exact and approximate approaches to single-path NUM~\cite{junosza}. Thus neither ``routing changes congestion'' nor ``use a mixed-integer model'' is a novelty claim.
+
+Tree-constrained allocation has direct precedents, including cluster-tree rate allocation~\cite{morell} and fair rate/routing optimization with energy harvesting~\cite{marasevic}. Their resource assumptions differ from ours. The result used here depends on every non-root internal node having its own equal-weight flow, not merely on the topology being a tree. Generalized Benders decomposition supplies the decomposition methodology~\cite{geoffrion}. Edmonds' optimum branching algorithm~\cite{edmonds} assumes fixed additive edge scores; our utility changes with downstream sharing, so those edge scores cannot simply be supplied once.
+
+The archive's contribution is a self-contained specialization, its reference implementations, and an inspectable record of tests. We have not reproduced the competing literature algorithms under a common budget or established priority for the structural theorem. The internal baselines below are not a comparison against the state of the art.
+
+\section{Model: From the Matrix to Fair Operation}
+Let $V=\{0,1,\ldots,n\}$, with root $0$ and $N=n+1$ total nodes. The input is $R\in\mathbb R_+^{N\times N}$, where $R_{ii}=0$ and $R_{ij}=0$ denotes an unavailable connection. Positive $R_{ij}$ is an effective service upper bound for directed connection $i\to j$. Symmetry is not required. An isolated throughput observation under unrelated traffic need not estimate this bound correctly; measurement is a separate unfinished component.
+
+Each non-root node consumes one saturated, equal-weight, independent flow from the root. An internal node consumes its own flow as well as forwarding other flows. The root has no demand. A feasible topology is an outward rooted spanning tree $T$ using positive entries of $R$. Let $P_j(T)$ be the root path to $j$. Its incidence matrix is
+\begin{equation}
+A_{ej}(T)=\mathbf1\{e\in P_j(T)\},\qquad A(T)x\le r_T,
+\label{eq:capacity}
+\end{equation}
+where $x_j>0$ is delivered flow rate and $r_T$ lists selected link capacities. Equivalently, the link entering $j$ carries
+\begin{equation}
+f_{\mathrm{par}(j),j}=\sum_{k\in S_j(T)}x_k
+\le R_{\mathrm{par}(j),j},
+\end{equation}
+with $S_j$ containing $j$ and all its descendants.
+
+Different links operate independently in steady-state pipelines. A lone flow is bounded by the minimum service rate on its path; with competing flows, all constraints in~\eqref{eq:capacity} are needed. There is no extra network-wide capacity $C$ and no automatic inverse-hop penalty. Shared radio airtime, half-duplex node budgets, finite-file startup, and queueing delay are outside this model.
+
+Denote ideal max-min fair operation by $F(T;R)$. The topology objective is
+\begin{equation}
+\max_{T\in\mathcal T(R)} U(F(T;R)),\quad
+U(x)=\sum_{j=1}^n\log(x_j/x_{\rm ref}),
+\label{eq:objective}
+\end{equation}
+for a fixed reference unit $x_{\rm ref}>0$. This maximizes the geometric mean, not total throughput or every node's individually preferred rate. The model does not assert that any deployed SCP mode realizes $F$.
+
+\subsection{A Three-Node Example}
+Set $R_{01}=10$, $R_{02}=2$, and $R_{12}=R_{21}=4$. The star gives $(10,2)$. For $0\to1\to2$, the constraints are $x_1+x_2\le10$ and $x_2\le4$. Equal growth first reaches $(4,4)$; node 2 freezes and node 1 uses the remaining capacity, yielding $(6,4)$. The product increases from $20$ to $24$ even though total rate decreases from $12$ to $10$.
+
+More generally, for the chain with capacities $a,c$, maximizing $\log(a-t)+\log t$ gives
+\begin{equation}
+x_2=\min(c,a/2),\qquad x_1=a-x_2.
+\end{equation}
+This also follows from progressive filling. It supplies an analytic oracle for small tests; it is not a prescription to enumerate large trees.
+
+\section{Why the Fixed-Tree Subproblem is Convex}
+Let $B$ be the unfrozen flows. For each selected edge entering $j$, maintain residual capacity and active count
+\begin{equation}
+q_j=r_j-\sum_{k\in S_j\setminus B}x_k,\qquad a_j=|S_j\cap B|.
+\end{equation}
+Choose $t=\min_{j:a_j>0}q_j/a_j$ and freeze every active flow in one minimizing subtree at rate $t$. Update residuals and repeat. Here $t$ is an absolute rate: residuals have deducted frozen flows only. If $m$ flows freeze in another constraint, $q'_j=q_j-mt\ge t(a_j-m)$. Thus successive levels never decrease and all capacities remain feasible. Every frozen flow has a saturated constraint containing only flows no faster than itself, proving max-min fairness.
+
+\begin{proposition}
+Under the stated all-node-demand model, progressive filling is the unique solution of $\max_{x>0}U(x)$ subject to~\eqref{eq:capacity}.
+\end{proposition}
+\begin{proof}
+For a non-root parent $i$ and child $j$, any subtree constraint freezing $i$ also contains $j$. Hence $x_i\ge x_j$. If the inequality is strict, the constraint that froze $j$ before $i$ must be the edge entering $j$, so that edge is saturated. A root-child edge is saturated as well: its child's own flow cannot freeze at any descendant constraint.
+
+Define $p_0=0$, $p_j=1/x_j$, and $\lambda_{ij}=p_j-p_i$ on tree edges. These multipliers are nonnegative; positive multipliers imply saturated edges. Prices telescope along each root path, giving $\sum_{e\in P_j}\lambda_e=1/x_j$. For any feasible $z$, concavity now implies
+\begin{align}
+U(z)-U(x)&\le\sum_j(z_j-x_j)/x_j\\
+&=\sum_e\lambda_e\big((Az)_e-(Ax)_e\big)\le0.
+\end{align}
+These are the KKT conditions, and strict concavity gives uniqueness.
+\end{proof}
+
+The conclusion is conditional. Pure relay nodes, arbitrary weights, or additional shared resources require a new argument. Nor does proportional fairness automatically hold across different trees: for $(6,4)$ versus the star $(10,2)$, the proportional change sums to $4/6-2/4=1/6>0$. Fixed-tree convex fairness and selection over a nonconvex union of trees are distinct statements.
+
+\section{Constructing the Tree During Optimization}
+For $E=\{(i,j):R_{ij}>0,\ j\ne0\}$ introduce binary parent decisions $y_{ij}$ and aggregate flows $f_{ij}$. Rates are normalized below so $x_{\rm ref}=1$. The joint problem is
+\begin{align}
+\max\quad &\sum_{j=1}^n\log x_j\label{eq:joint}\\
+\text{s.t.}\quad&\sum_{i:(i,j)\in E}y_{ij}=1 &&(j\ne0),\nonumber\\
+&0\le f_{ij}\le R_{ij}y_{ij} &&((i,j)\in E),\nonumber\\
+&\sum_i f_{ij}-\sum_k f_{jk}=x_j>0 &&(j\ne0),\nonumber\\
+&d_0=0,\quad1\le d_j\le n &&(j\ne0),\nonumber\\
+&d_j\ge d_i+1-(n+1)(1-y_{ij}),\nonumber\\
+&y_{ij}\in\{0,1\} &&((i,j)\in E).\nonumber
+\end{align}
+Absent-edge flows in sums are zero. Selected edges strictly increase depth. One parent per non-root node plus acyclicity implies root reachability. Summing conservation over a subtree cancels its internal edges and recovers~\eqref{eq:capacity}. Conversely, any tree and feasible rates define these flows and depths. Proposition 1 therefore makes~\eqref{eq:joint} equivalent to~\eqref{eq:objective}. The optimizer chooses the tree; its rate variables describe the ideal fair outcome.
+
+\subsection{Difficulty and the Meaning of a Guarantee}
+The archive gives a strong NP-hardness reduction from 3-PARTITION~\cite{garey}. For integers $a_i$ summing to $mB$, with $B/4<a_i<B/2$, create $m$ hubs, each reached from the root with capacity $B+1$. An item head has $a_i-1$ private leaves, each with capacity 1, and can attach to any hub with capacity $a_i$. Every non-root node has its own flow. There are $n=m(B+1)$ flows and root-cut capacity $n$. Jensen's inequality gives $U\le0$, with equality exactly when every flow has rate 1. Equality requires each hub to host item groups totaling $B$, and therefore exactly three groups. The converse follows by assigning any valid partition. The construction has polynomial size on the strongly bounded 3-PARTITION subclass.
+
+This is a model-specific argument, not the first hardness result for joint routing. It rules out a general polynomial-time exact promise unless P=NP. Counting $N^{N-2}$ labeled rooted trees on a complete graph, rather than $N!$, is informative but is not itself a hardness proof.
+
+\subsection{Bounds on Unfinished Parent Assignments}
+A search state $P$ fixes only some parents. Remove alternative incoming edges for those nodes and retain all legal choices for the others. Let $b_j(P)$ be the widest root-to-$j$ bottleneck in this allowed graph. Every completion satisfies $x_j\le b_j(P)$, so
+\begin{equation}
+V(T)\le B(P)=\sum_j\log b_j(P)\quad(T\text{ completing }P).
+\end{equation}
+Unreachable nodes make the state infeasible. The bound is cheap because it ignores competition; that same omission makes it loose on some instances.
+
+A stronger global cut follows from any $p_j>0$, $p_0=0$. Since $\log x_j\le p_jx_j-\log p_j-1$, conservation gives
+\begin{align}
+V(y)&\le Q(y,p),\label{eq:cut}\\
+Q(y,p)&=-\sum_j\log p_j-n+
+\sum_{(i,j)\in E}R_{ij}\pos{p_j-p_i}y_{ij}.\nonumber
+\end{align}
+Indeed, $\sum_jp_jx_j=\sum_{ij}(p_j-p_i)f_{ij}$; positive coefficients use capacity bounds and negative coefficients use $f\ge0$. At an evaluated tree's fair solution, choose $p_j=1/x_j$. Proposition 1 makes both inequalities equalities, so the cut is tight there. It constrains every other candidate topology as well; it is not just a stored score for the evaluated tree.
+
+An ideal exact master maximizes a utility variable $\theta$ subject to all accumulated cuts $\theta\le Q(y,p)$. A repeated tree cannot exceed its already known utility. Until the upper and lower bounds close, a new tree must be evaluated; finitely many trees imply finite termination. This argument assumes exact bounds and global master optimization, and gives no fixed runtime limit.
+
+\subsection{Anytime Search and Implementation Variants}
+Let $L$ be the best verified feasible utility, and $H$ the largest valid bound over the entire unresolved frontier and $L$. If $G$ denotes geometric mean rate, then
+\begin{equation}
+\frac{G_{\rm best}}{G^*}\ge\exp((L-H)/n).
+\label{eq:certificate}
+\end{equation}
+To certify a loss of at most $\epsilon$, it suffices that $H-L\le-n\log(1-\epsilon)$. Unprocessed states must remain represented; returning the bound of only the most recently visited branch would be invalid.
+
+\begin{figure}[t]
+\small\hrule\vspace{4pt}
+\textbf{Algorithm 1: Budgeted parent search (Lite specification)}\\
+Input: $R$, root, target $\epsilon$, state budget $K$.\\
+1. Check root reachability; initialize a feasible tree and $L$.\\
+2. Put the all-undecided state in frontier $\mathcal F$.\\
+3. While $\mathcal F\ne\varnothing$ and budget remains:\\
+\hspace*{1em}Compute $H=\max(L,\max_{P\in\mathcal F}B(P))$.\\
+\hspace*{1em}Stop if the target in~\eqref{eq:certificate} is met.\\
+\hspace*{1em}Pop $P$; close it if infeasible or $B(P)\le L$.\\
+\hspace*{1em}If complete, evaluate fair rates and update $L$.\\
+\hspace*{1em}Otherwise choose an undecided node and branch\\
+\hspace*{1em}over \emph{all} its legal parents, retaining valid bounds.\\
+4. Return the best tree, predicted rates, $L,H$, and ratio bound.\vspace{4pt}\hrule
+\caption{Mathematical search specification. Parent ordering may be heuristic; search coverage and valid upper bounds provide the guarantee.}
+\end{figure}
+
+Lite uses widest-path bounds and no external solver. Dense widest-path evaluation and a subtree-based fair evaluator each take $O(N^2)$ arithmetic operations per state. A depth-first frontier has at most $1+(N-1)(N-2)$ states. With full parent arrays, storage is $O(N^3)$; worst-case search time remains exponential. The current Python prototype is not an MCU timing or memory measurement.
+
+RC2 uses SCIP with aggregate flow constraints, logarithmic tangent outer approximations, and price cuts~\eqref{eq:cut}. Integer candidate trees are evaluated by rational progressive filling before an optimistic surrogate objective can become an incumbent. Rational tree feasibility does not make floating-point logarithms or solver dual bounds exact. Both implementations currently return \emph{numerical certificates}; directed-rounding verification remains open.
+
+\subsection{A Four-Node Construction from Bounds}
+Consider
+\begin{equation}
+R=\begin{pmatrix}0&10&2&12\\10&0&4&3\\2&4&0&12\\12&3&12&0\end{pmatrix}.
+\end{equation}
+Branch only on node 2's parent. If it is 0, all completions have product at most $10\cdot2\cdot12=240$. If it is 1, then $x_1+x_2\le10$, $x_2\le4$, and $x_3\le12$, yielding at most $288$. If it is 3, then $x_2+x_3\le12$ and $x_1\le10$, yielding at most $360$. Equality in the last state requires $(10,6,6)$. Node 1 must attach to 0; node 3 must attach to 0 because choosing 2 would form a cycle. The resulting edges $0\to1$, $0\to3$, $3\to2$ achieve the bound. Thus the bound and its equality conditions construct a globally optimal tree without listing all complete trees first.
+
+\section{Archived Evaluation and Negative Results}
+The October 4 experiment comprises 84 matrices: $N\in\{3,4,5,6,7,8,10\}$, six families, and two seeds per family and size. Families are dense, symmetric, sparse with a reachable backbone, layered, clustered, and heterogeneous powers-of-two rates. Each matrix runs five methods three times in randomized order within each repetition block: BFS, widest-path tree, local subtree reattachment, Lite, and RC2. There are 1,260 calls, not 1,260 independent network samples. Seeds, matrices, parent vectors, rates, bounds, source hashes, and timings are retained.
+
+Local search permits 200 legal complete-tree evaluations, Lite 10,000 states, and RC2 a five-second soft budget with a 1\% target. These are different budgets, so timings do not establish an equal-resource comparison. The recorded host is a Ryzen 7 7730U running Windows and Python 3.12.10, with PySCIPOpt 6.2.1. Timing includes the complete solver call, excluding imports, warm-up, and separate checking; there is no hard real-time scheduling.
+
+\begin{table}[t]
+\centering\small
+\caption{Selected October 4 results. Time is the median of per-matrix medians. Quality is the worst per-matrix median ratio. At $N=6$ it uses an exact optimum; at $N=8,10$ it is a lower bound using a common numerical upper bound. ``Target'' counts calls with the method's own 1\% certificate.}
+\label{tab:results}
+\begin{tabular}{rlrrr}
+\toprule
+$N$ & Method & Time (ms) & Quality & Target /36\\\midrule
+6 & Local & 2.135 & .876906 & ---\\
+6 & Lite & 1.943 & 1.000000 & 36\\
+6 & RC2 & 8.110 & 1.000000 & 36\\
+8 & Local & 8.186 & .959978 & ---\\
+8 & Lite & 205.859 & .842810 & 21\\
+8 & RC2 & 63.136 & .993458 & 36\\
+10 & Widest & .336 & .150307 & ---\\
+10 & Local & 20.642 & .485454 & ---\\
+10 & Lite & 285.686 & .682101 & 12\\
+10 & RC2 & 32.825 & .990236 & 36\\\bottomrule
+\end{tabular}
+\end{table}
+
+All returned structures and capacities passed the archived checks. For 48 matrices with $N\le6$, rational exhaustive enumeration supplies an exact product optimum. This enumeration is a test oracle, not the construction algorithm. RC2 and Lite matched those optima. Local search has a genuine $0.876906$ geometric-mean ratio on one six-node case, demonstrating that a locally stable tree need not be globally good.
+
+For larger cases the common reference is the smallest numerical upper bound across the runs, rather than a known exact optimum. A low reported lower bound can reflect bound looseness as well as poor tree quality; it must not be read as measured optimality loss. RC2 met its own target in 252/252 calls, with maximum full-call time 1.7642 seconds. Lite met it in 213/252 calls, including only 12/36 ten-node calls. Neither number proves performance on arbitrary inputs or real wireless measurements.
+
+A separate, subsequent exploratory ablation used 36 new matrices at sizes 6, 8, and 10, with default RC2, initial local improvement disabled, or strengthened preprocessing disabled. All 324 calls met the target. Median times did not show consistent acceleration from either feature. Price cuts were not independently disabled, so their isolated contribution remains unmeasured. Main and ablation data are kept separate.
+
+Earlier records explain the narrowed engineering target. RC1 met the original 3--27-node target on only 51/57 cases; its early timing excluded some lifecycle work. The ten-node RC2 suite later met the target on 101/101 cases under full-call timing. Warm starts were slower in four of six recorded insertion scenarios. These historical suites are not pooled with the October 4 suite, and none establishes that warm starts or preprocessing always help.
+
+\section{Integration Boundary and Remaining Work}
+CCNET's communication tree is not LTTit's world-tree resource namespace, and neither is a task dependency graph. Installing new routes also requires membership discovery, measured directed service estimates, versioning, loop-free transition handling, and rollback under failure. The optimizer currently supplies parent decisions and ideal rates; it does not implement those distributed operations.
+
+Three gaps prevent treating this as a finished embedded networking solution. First, a shared radio or processor can couple links that the current matrix treats as independent. Adding those resource constraints can invalidate the fixed-tree fairness equivalence and requires a fresh proof. Second, real transport may not implement equal-flow max-min fairness. SCP's historical asymmetric outcomes cannot be silently replaced by the ideal oracle. Third, a good steady-state utility does not bound queueing delay, deadline misses, or the interruption caused by changing parents.
+
+The immediate engineering path is to validate service estimation and fair-rate prediction on a small measured topology, then port Lite's explicit state handling if needed. Grouping hundreds of nodes remains a separate problem: interface flow counts and intergroup shared capacities must be preserved before a group-level guarantee has meaning. A ten-node bound is not automatically a whole-cluster bound.
+
+\section{Conclusion and Artifact Status}
+The research has reached a precise ideal model, conditional structural proofs, joint optimization formulations, and evaluated small-instance reference programs. Its central advance within the project was replacing independent path scores with topology-dependent sharing and a reported global gap. It has not reached automatic distributed operation, physical validation, or an established claim of theoretical priority.
+
+This paper consolidates existing discussion records, mathematical development, and October 4 experiment reports rather than reporting new runs. The underlying historical code and raw data are maintained in the author's original research workspaces; they are not bundled with this self-contained manuscript. The numerical tables record historical results, whose independent reproduction requires those original artifacts.
+
+\begin{thebibliography}{10}
+\bibitem{kelly} F. P. Kelly, A. K. Maulloo, and D. K. H. Tan, ``Rate control for communication networks: Shadow prices, proportional fairness and stability,'' \emph{J. Operational Research Society}, vol. 49, pp. 237--252, 1998. doi:10.1057/palgrave.jors.2600523.
+\bibitem{wang} J. Wang, L. Li, S. H. Low, and J. C. Doyle, ``Cross-layer optimization in TCP/IP networks,'' \emph{IEEE/ACM Trans. Networking}, vol. 13, no. 3, pp. 582--595, 2005. doi:10.1109/TNET.2005.850219.
+\bibitem{junosza} K. Junosza-Szaniawski and D. Nogalski, ``Exact and approximation algorithms for joint routing and flow rate optimization,'' \emph{ACSIS}, vol. 20, pp. 29--36, 2019. doi:10.15439/2019F85.
+\bibitem{morell} A. Morell et al., ``Optimal rate allocation in cluster-tree WSNs,'' \emph{Sensors}, vol. 11, pp. 3611--3639, 2011. doi:10.3390/s110403611.
+\bibitem{marasevic} J. Marasevic, C. Stein, and G. Zussman, ``Max-min fair rate allocation and routing in energy harvesting networks: Algorithmic analysis,'' arXiv:1406.3671v2, 2014.
+\bibitem{geoffrion} A. M. Geoffrion, ``Generalized Benders decomposition,'' \emph{J. Optimization Theory and Applications}, vol. 10, pp. 237--260, 1972. doi:10.1007/BF00934810.
+\bibitem{edmonds} J. Edmonds, ``Optimum branchings,'' \emph{J. Research NBS, Section B}, vol. 71B, pp. 233--240, 1967.
+\bibitem{garey} M. R. Garey and D. S. Johnson, \emph{Computers and Intractability}. W. H. Freeman, 1979, problem SP15.
+\end{thebibliography}
+\end{document}
